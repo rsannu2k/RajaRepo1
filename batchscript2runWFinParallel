@@ -1,0 +1,307 @@
+Path: /xl/apps/Informatica/10.2.0/server/infa_shared/script
+Path: /xl/apps/Informatica/10.2.0/server/infa_shared/SrcFiles
+
+Clear_all_done_files  rm -f $PMTargetFileDir/gl_balance_f_done_*
+Clear_fail_Files   rm -f $PMTargetFileDir/gl_balance_f_fail_file.txt
+Clear_failed_part_files rm -f $PMTargetFileDir/gl_bal_f_fail_wflw_*
+Backupfiles rm -f $PMTargetFileDir/GL_BKP/gl_balance*
+ksh -x $PMRootDir/script/efrl_gl_bal_fact_concur_run.ksh $$No_of_partition_per_loop
+
+
+
+
+
+
+##############################################################################
+#                                                                            #
+#              EFRL SCRIPT TO RUN GL BALANCE FACT LOAD  CONCURRENTLY         #
+#                                                                            #
+##############################################################################
+
+
+#Debug mode
+#set -x
+source /xl/apps/Informatica/10.2.0/server/credentials.in
+source /xl/apps/Informatica/10.2.0/server/infa_shared/SrcFiles/domaindetails.in
+WF_FOLDER="Custom_SILOS"
+#WORKFLOW=$1
+No_of_partition_per_loop=$1
+EFRL_LOG=/xl/apps/Informatica/10.2.0/logs
+WKF_LOG=$EFRL_LOG/$WORKFLOW"_"`date +"%Y%m%d%H%M%S"`".log"
+PARAM_FILE_PATH=/xl/apps/Informatica/10.2.0/server/infa_shared/SrcFiles
+TARGET_FILE_PATH=/xl/apps/Informatica/10.2.0/server/infa_shared/TgtFiles
+EFRL_LOG=/xl/apps/Informatica/10.2.0/logs
+Date=`date +"%C%y:%m:%d %H:%M:%S"`
+SCRIPT_LOG=/xl/apps/Informatica/10.2.0/server/infa_shared/log
+exec > $SCRIPT_LOG/sil_gl_balance.log 2>&1
+chmod 777 $SCRIPT_LOG/sil_gl_balance.log
+rm -f $TARGET_FILE_PATH/gl_total_done_*
+rm -f $TARGET_FILE_PATH/GL_BKP/gl_balance_f_done_*
+rm -f $TARGET_FILE_PATH/gl_bal_f_fail_wflw*
+rm -f $TARGET_FILE_PATH/gl_balance_f_*
+rm -f $TARGET_FILE_PATH/gl_balance_partition_failure_list.txt
+echo "No_of_partition_per_loop:$No_of_partition_per_loop"
+rmdir $TARGET_FILE_PATH/GL_BKP
+chmod 777 $TARGET_FILE_PATH/gl_bal_f_fail_wflw*
+
+no_of_partition=1
+i=1
+
+####################Calculate the number of buckets##################
+
+no_of_partitions=$(grep --regexp="$" --count $PARAM_FILE_PATH/GL_Balance_Cntrl_File.txt)
+
+if [ `expr $no_of_partitions % $No_of_partition_per_loop` -eq 0 ]
+then
+echo First
+buckets="$(echo $(( no_of_partitions/$No_of_partition_per_loop )))"
+else
+echo Second bucket
+buckets="$(echo $(( no_of_partitions/$No_of_partition_per_loop+ 1 )))"
+fi
+
+echo $buckets ###( No of buckets is the number of loops the code will run)
+
+echo No of buckets is the number of loops the code will run: $buckets 
+
+
+####################################################################
+
+
+############Take copy of the run control file#######################
+
+cp $PARAM_FILE_PATH/GL_Balance_Cntrl_File.txt $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt
+
+chmod 777 $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt
+
+cat  $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt
+
+####################################################################
+######### MAIN LOOP ################################################
+
+while [ $buckets -ne 0 ]
+do
+
+echo 'Inside main loop'
+
+head -$No_of_partition_per_loop $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt > $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+chmod 777 $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+
+###### Read first No_of_partition_per_loop lines ####################
+############### "d" Remove the read lines ###########################
+sed -i -e 1,$No_of_partition_per_loop"d"  $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt 
+
+
+file=$PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+
+echo "File Path : $file "
+
+no_of_done_files=$(grep --regexp="$" --count $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt)
+
+echo "no_of_done_files :$no_of_done_files "
+
+################Loop to read the control file##################################
+
+
+	while read line
+
+	do
+
+partition_value_init=`echo "$line" | cut -d'|' -f1`
+partition_name=`echo "$line" | cut -d'|' -f2`
+echo $partition_name
+
+###############IF Loop to determine the relational operator based on the partition names##############
+
+if [ $partition_name == P_PR_YRS ]
+then
+ partition_value='le'$partition_value_init
+elif [ $partition_name == P_MAXVALUE ]
+then
+ partition_value='ge'$partition_value_init
+else
+ partition_value='eq'$partition_value_init
+fi
+#####################################################################################################
+
+
+partition_name_value=$partition_value'C'$partition_name
+
+
+pmcmd startworkflow -sv $INFASERVICENAME -d $INFADOMAINNAME -u $INFAUSER -p $INFAPASSWORD -f $WF_FOLDER -nowait -rin $partition_name_value Cust_SIL_GLBalanceFact
+
+i=`expr $i + 1`
+
+exitstatus=$?
+
+if [ $exitstatus -ne 0 ]
+
+    then
+        
+echo "Workflow was not triggered succesfully. Please check log : $WKF_LOG , for details"
+        exit 1
+  
+else
+echo "Workflow triggered Successfully at "`date +"%C%y:%m:%d %H:%M:%S"`
+touch $TARGET_FILE_PATH/gl_total_done_$partition_name_value.txt
+echo "*********************Touch File created Processing Next Partition value ******************"
+fi
+done <"$file"
+######################Check if all the done files have come##########################################
+cd $TARGET_FILE_PATH
+while true
+do
+# check Counter_var greater than Zero, means there is some worklfow completed
+
+Counter_var=`ls gl_balance_f_done_* | wc -l`
+if [ $Counter_var -gt 0 ]
+then
+# if success touch is > 0 we can release next partitions based on the count in $Counter_var
+#-----------------------------------------------------------------------------------------
+################Second Loop release each partition as soon as it complete##################################
+
+echo "***Second Loop release each partition as soon as it complete***"
+
+head -$Counter_var $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt > $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+
+cat  $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+
+chmod 777 $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+
+###### Read first Counter_var lines ######
+sed -i -e 1,$Counter_var"d"  $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt ################ Remove the read lines ##############
+file=$PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+echo after deleting
+cat $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt
+echo "File Path : $file "
+no_of_second_done_files=$(grep --regexp="$" --count $PARAM_FILE_PATH/GL_Balance_Cntrl_File_RUN_File.txt)
+echo "no_of_second_done_files :$no_of_second_done_files "
+################Loop to read the control file##################################
+
+
+#-----------------------------------------------------------------------------------------
+### while loops second release rest of the partitions start here #############
+
+while read line
+do
+partition_value_init=`echo "$line" | cut -d'|' -f1`
+partition_name=`echo "$line" | cut -d'|' -f2`
+echo $partition_name
+
+###############IF Loop to determine the relational operator based on the partition names##############
+
+if [ $partition_name == P_PR_YRS ]
+then
+ partition_value='le'$partition_value_init
+elif [ $partition_name == P_MAXVALUE ]
+then
+ partition_value='ge'$partition_value_init
+else
+ partition_value='eq'$partition_value_init
+fi
+#####################################################################################################
+
+
+partition_name_value=$partition_value'C'$partition_name
+
+
+pmcmd startworkflow -sv $INFASERVICENAME -d $INFADOMAINNAME -u $INFAUSER -p $INFAPASSWORD -f $WF_FOLDER -nowait -rin $partition_name_value Cust_SIL_GLBalanceFact
+
+
+i=`expr $i + 1`
+
+exitstatus=$?
+    
+   
+
+if [ $exitstatus -ne 0 ]
+
+    then
+        
+echo "Workflow was not triggered succesfully. Please check log : $WKF_LOG , for details"
+        exit 1
+
+    
+else
+
+
+   echo "Workflow triggered Successfully at "`date +"%C%y:%m:%d %H:%M:%S"`
+
+   touch $TARGET_FILE_PATH/gl_total_done_$partition_name_value.txt
+   
+   echo "*********************Touch File created Processing Next Partition value ******************"
+	
+ 
+
+    fi
+
+
+done <"$file"
+ 
+##############Removing success done files after creating copy in GL_BKP folder to make sure for the next run it will count the pending partitions from intermedi file#############
+
+	cd $TARGET_FILE_PATH
+	mkdir GL_BKP
+	chmod 777 $TARGET_FILE_PATH/GL_BKP
+	cp $TARGET_FILE_PATH/gl_balance_f_done_*  $TARGET_FILE_PATH/GL_BKP
+	cd $TARGET_FILE_PATH/GL_BKP
+	total_success_done_files=`ls gl_balance_f_done_* | wc -l`
+	echo $total_success_done_files
+	rm -f $TARGET_FILE_PATH/gl_balance_f_done_*
+
+echo 'Next bucket run startin  '
+					
+### while loops second release rest of the partitions end here #############
+
+#no_of_files: to get count from interme txt file,total_no_of_partitions to get count from gl bal cntrl txt file to handle +ve scenario
+#no_failure_files to get count of fail touch files,total: to get diff of(total no of partitions and failure files) to handle -ve scenario
+
+cd $TARGET_FILE_PATH
+echo $TARGET_FILE_PATH
+
+no_of_files=$(grep --regexp="$" --count $PARAM_FILE_PATH/GL_Balance_Cntrl_File_INTERMEDIATE.txt)
+echo $no_of_files
+total_no_of_partitions=$(grep --regexp="$" --count $PARAM_FILE_PATH/GL_Balance_Cntrl_File.txt)
+echo $total_no_of_partitions
+no_failure_files=`ls gl_bal_f_fail_wflw_* | wc -l`
+chmod 777 $TARGET_FILE_PATH/gl_balance_f_fail_file.txt
+chmod 777 $TARGET_FILE_PATH/gl_bal_f_fail_wflw*
+echo $no_failure_files
+
+total="$(($total_no_of_partitions-$no_failure_files))"
+
+ls gl_bal_f_fail_wflw* >gl_balance_partition_failure_list.txt
+chmod 777 $TARGET_FILE_PATH/gl_balance_partition_failure_list.txt
+
+#intermediate file count shd be 0 and donefiles shd be eq to no of partitio
+
+elif [ $no_of_files -eq 0  -a  $total_success_done_files -eq $total_no_of_partitions ]
+
+then
+
+echo files found successfully
+break
+
+elif [ $no_of_files -eq 0  -a  $total_success_done_files -eq $total -a  $no_failure_files -gt 0  ]
+then
+sleep 5
+touch $TARGET_FILE_PATH/gl_balance_f_fail_file.txt
+
+chmod 777 $TARGET_FILE_PATH/gl_balance_f_fail_file.txt
+
+exit 0
+
+else
+
+sleep 1
+
+fi
+sleep 1
+
+done
+
+
+touch $TARGET_FILE_PATH/gl_balance_f_final_done_final.txt
+exit 0
+
+done
